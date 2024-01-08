@@ -23,6 +23,7 @@ TinyGsmClient client(modem);
 
 float lat = 0;
 float lon = 0;
+bool isConnected = false;
 
 void setup()
 {
@@ -83,6 +84,7 @@ void loop()
       String httpRequestData = "{\"ID\": 55,\"DT\": \"2023-15-11 20:00:00\",\"D\": \"GPS123\",\"Lng\": " + String(lon, 8) + ",\"Lat\":" + String(lat, 8) + "}";
 
       // HTTP POST Section
+      if (!isConnected) {
       modem.restart();
       SerialMon.print("Waiting for network...");
       if (!modem.waitForNetwork())
@@ -111,11 +113,14 @@ void loop()
       if (modem.isGprsConnected())
       {
         SerialMon.println("GPRS connected");
+        isConnected = true;
+      }
       }
 
       if (!client.connect(server, port))
       {
         SerialMon.println(" fail");
+        isConnected = false;
         return;
       }
 
