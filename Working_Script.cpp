@@ -133,6 +133,15 @@ int getBatteryLevel() {
     return -1; // Return -1 if the battery level could not be retrieved
 }
 
+void flashLED(int pin, int times, int delayMs) {
+    for (int i = 0; i < times; i++) {
+        digitalWrite(pin, HIGH);
+        delay(delayMs);
+        digitalWrite(pin, LOW);
+        delay(delayMs);
+    }
+}
+
 void performHttpPost(float lat, float lon, float temp, float hum) {
     // Get the current time
     time_t now = time(nullptr);
@@ -166,15 +175,24 @@ void performHttpPost(float lat, float lon, float temp, float hum) {
 
         // Read and print the response from the server
         unsigned long timeout = millis();
+        bool success = false;
         while (client.connected() && millis() - timeout < 10000L) {
             if (client.available()) {
                 char c = client.read();
                 SerialMon.print(c);
+                if (c == '2') { // Check for HTTP 2xx success response
+                    success = true;
+                }
                 timeout = millis();
             }
         }
         SerialMon.println("\nHTTP POST request complete.");
         client.stop();
+
+        if (success) {
+            SerialMon.println("Data successfully inserted into MongoDB. Flashing LED...");
+            flashLED(LED_PIN, 10, 100); // Flash LED 5 times quickly
+        }
     } else {
         SerialMon.println("Connection to server failed.");
     }
