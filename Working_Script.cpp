@@ -100,6 +100,39 @@ void loop() {
     delay(10000); // Wait for 10 seconds before next loop iteration
 }
 
+int getBatteryLevel() {
+    SerialMon.println("Retrieving battery level...");
+
+    // Disable command echo to avoid receiving the echoed command
+    modem.sendAT("E0");
+    modem.waitResponse(1000); // Wait for the modem to process the command
+
+    // Send the AT+CBC command to get battery status
+    modem.sendAT("+CBC");
+    if (modem.waitResponse(1000, "+CBC:") == 1) { // Wait for the response containing "+CBC:"
+        String response = modem.stream.readStringUntil('\n'); // Read the response line
+        SerialMon.println("Response: " + response); // Print the response for debugging
+
+        // Extract the voltage value from the response
+        int voltageStart = response.indexOf(" ") + 1; // Find the first space
+        int voltageEnd = response.indexOf("V", voltageStart); // Find the "V" character
+        if (voltageStart > 0 && voltageEnd > voltageStart) {
+            String voltageStr = response.substring(voltageStart, voltageEnd); // Extract the voltage string
+            voltageStr.trim(); // Remove any extra whitespace
+            float voltage = voltageStr.toFloat(); // Convert the voltage to a float
+            SerialMon.printf("Battery Voltage: %.3fV\n", voltage);
+
+            // Map the voltage to a percentage (adjust these values based on your battery's specifications)
+            if (voltage >= 4.2) return 100; // Fully charged
+            if (voltage <= 3.0) return 0;   // Fully discharged
+            return (int)((voltage - 3.0) / (4.2 - 3.0) * 100); // Map voltage to percentage
+        }
+    }
+
+    SerialMon.println("Failed to retrieve battery level.");
+    return -1; // Return -1 if the battery level could not be retrieved
+}
+
 void performHttpPost(float lat, float lon, float temp, float hum) {
     // Get the current time
     time_t now = time(nullptr);
@@ -109,6 +142,10 @@ void performHttpPost(float lat, float lon, float temp, float hum) {
     char timestamp[20];
     strftime(timestamp, sizeof(timestamp), "%Y-%d-%m %H:%M:%S", timeinfo);
 
+    // Get battery level
+    int batteryLevel = getBatteryLevel();
+    SerialMon.printf("Battery Level: %d%%\n", batteryLevel); // Debug log for battery level
+
     // Check network connection and connect to GPRS
     if (!checkNetworkAndConnect()) {
         return; // Exit if network connection or GPRS connection fails
@@ -117,7 +154,7 @@ void performHttpPost(float lat, float lon, float temp, float hum) {
     // Perform HTTP POST request
     if (client.connect(server, port)) {
         SerialMon.println("Connected to server, performing HTTP POST request...");
-        String httpRequestData = "{\"trackerID\": 55,\"DT\": \"" + String(timestamp) + "\",\"D\": \"GPS123\",\"Temp\": " + String(temp, 5) + ",\"Hum\": " + String(hum, 5) + ",\"Lng\": " + String(lon, 8) + ",\"Lat\":" + String(lat, 8) + "}";
+        String httpRequestData = "{\"trackerID\": 55,\"DT\": \"" + String(timestamp) + "\",\"D\": \"GPS123\",\"Temp\": " + String(temp, 5) + ",\"Hum\": " + String(hum, 5) + ",\"Lng\": " + String(lon, 8) + ",\"Lat\":" + String(lat, 8) + ",\"Batt\":" + String(batteryLevel) + "}";
         client.print(String("POST ") + resource + " HTTP/1.1\r\n");
         client.print(String("Host: ") + server + "\r\n");
         client.println("Connection: close");
