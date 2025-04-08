@@ -65,6 +65,39 @@ void setup() {
         SerialMon.println("Modem initialized successfully.");
     }
 
+    // Disable command echo
+    modem.sendAT("ATE0");
+    if (modem.waitResponse(1000) != 1) {
+        SerialMon.println("Failed to disable command echo.");
+    }
+
+    // Ensure GPS is powered on with retries
+    bool gpsPoweredOn = false;
+    for (int i = 0; i < 5; i++) { // Retry up to 5 times
+        modem.sendAT("+CGNSPWR=1");
+        if (modem.waitResponse(2000) == 1) {
+            gpsPoweredOn = true;
+            break;
+        }
+        SerialMon.println("Failed to power on GPS. Retrying...");
+        delay(2000); // Wait 2 seconds before retrying
+    }
+
+    if (!gpsPoweredOn) {
+        SerialMon.println("Failed to power on GPS after multiple attempts.");
+    } else {
+        SerialMon.println("GPS powered on successfully.");
+    }
+
+    // Verify GPS power status
+    modem.sendAT("+CGNSPWR?");
+    if (modem.waitResponse(1000) == 1) {
+        String gpsPowerStatus = modem.stream.readStringUntil('\n');
+        SerialMon.println("GPS Power Status: " + gpsPowerStatus);
+    } else {
+        SerialMon.println("Failed to retrieve GPS power status.");
+    }
+
     // Configure NTP servers
     configTime(0, 0, "pool.ntp.org", "time.nist.gov");
     SerialMon.println("Waiting for NTP time sync...");
@@ -76,28 +109,67 @@ void setup() {
 }
 
 void loop() {
+    static bool gpsEnabled = false; // Track GPS state
+    static bool gprsConnected = false; // Track GPRS connection state
+
+    if (!gpsEnabled) {
+        SerialMon.println("Enabling GPS...");
+        modem.enableGPS();
+        gpsEnabled = true; // Mark GPS as enabled
+    }
+
     float lat, lon;
     float temp = sht31.readTemperature();
     float hum = sht31.readHumidity();
 
-    // Enable GPS and wait for signal acquisition
-    SerialMon.println("Enabling GPS...");
-    modem.enableGPS();
-    delay(60000); // Wait 60 seconds for GPS signal acquisition
-
-    // Attempt to get GPS location
+    // Attempt to get GPS location with retries
     SerialMon.println("Attempting to get GPS location...");
-    if (modem.getGPS(&lat, &lon)) {
-        SerialMon.printf("GPS Location: Latitude: %f, Longitude: %f\n", lat, lon);
-        // Proceed with network check and HTTP POST request
-        performHttpPost(lat, lon, temp, hum);
-    } else {
-        SerialMon.println("Failed to get GPS location.");
+    bool gpsFix = false;
+    for (int i = 0; i < 10; i++) { // Retry up to 10 times
+        if (modem.getGPS(&lat, &lon)) {
+            gpsFix = true;
+            break;
+        }
+
+        // Log GPS status for debugging
+        modem.sendAT("+CGNSINF");
+        if (modem.waitResponse(1000) == 1) {
+            String gpsStatus = modem.stream.readStringUntil('\n');
+            SerialMon.println("GPS Status: " + gpsStatus);
+
+            // Check if GPS has a fix (based on CGNSINF response format)
+            if (gpsStatus.indexOf(",1,") != -1) { // "1" indicates a valid fix
+                gpsFix = true;
+                break;
+            }
+        } else {
+            SerialMon.println("Failed to retrieve GPS status.");
+        }
+
+        SerialMon.println("Failed to get GPS location. Retrying...");
+        delay(5000); // Wait 5 seconds before retrying
     }
 
-    // Disable GPS to save power
-    modem.disableGPS();
-    delay(10000); // Wait for 10 seconds before next loop iteration
+    if (gpsFix) {
+        SerialMon.printf("GPS Location: Latitude: %f, Longitude: %f\n", lat, lon);
+
+        // Check network connection and connect to GPRS if not already connected
+        if (!gprsConnected) {
+            SerialMon.println("Connecting to GPRS...");
+            if (!checkNetworkAndConnect()) {
+                SerialMon.println("Failed to connect to GPRS.");
+                return; // Exit if GPRS connection fails
+            }
+            gprsConnected = true; // Mark GPRS as connected
+        }
+
+        // Perform HTTP POST request
+        performHttpPost(lat, lon, temp, hum);
+    } else {
+        SerialMon.println("Failed to get GPS location after multiple attempts.");
+    }
+
+    delay(10000); // Wait for 10 seconds before the next loop iteration
 }
 
 int getBatteryLevel() {
@@ -155,51 +227,57 @@ void performHttpPost(float lat, float lon, float temp, float hum) {
     int batteryLevel = getBatteryLevel();
     SerialMon.printf("Battery Level: %d%%\n", batteryLevel); // Debug log for battery level
 
-    // Check network connection and connect to GPRS
-    if (!checkNetworkAndConnect()) {
-        return; // Exit if network connection or GPRS connection fails
+    // Ensure GPRS connection is active
+    if (!modem.isGprsConnected()) {
+        SerialMon.println("GPRS is not connected. Attempting to reconnect...");
+        if (!checkNetworkAndConnect()) {
+            SerialMon.println("Failed to reconnect to GPRS.");
+            return;
+        }
+    }
+
+    // Attempt to reuse the connection for multiple HTTP POST requests
+    if (!client.connected()) {
+        SerialMon.println("Establishing a new connection to the server...");
+        if (!client.connect(server, port)) {
+            SerialMon.println("Failed to connect to the server.");
+            return;
+        }
     }
 
     // Perform HTTP POST request
-    if (client.connect(server, port)) {
-        SerialMon.println("Connected to server, performing HTTP POST request...");
-        String httpRequestData = "{\"trackerID\": 55,\"DT\": \"" + String(timestamp) + "\",\"D\": \"GPS123\",\"Temp\": " + String(temp, 5) + ",\"Hum\": " + String(hum, 5) + ",\"Lng\": " + String(lon, 8) + ",\"Lat\":" + String(lat, 8) + ",\"Batt\":" + String(batteryLevel) + "}";
-        client.print(String("POST ") + resource + " HTTP/1.1\r\n");
-        client.print(String("Host: ") + server + "\r\n");
-        client.println("Connection: close");
-        client.println("Content-Type: application/json");
-        client.print("Content-Length: ");
-        client.println(httpRequestData.length());
-        client.println();
-        client.println(httpRequestData);
+    SerialMon.println("Performing HTTP POST request...");
+    String httpRequestData = "{\"trackerID\": 55,\"DT\": \"" + String(timestamp) + "\",\"D\": \"GPS123\",\"Temp\": " + String(temp, 5) + ",\"Hum\": " + String(hum, 5) + ",\"Lng\": " + String(lon, 8) + ",\"Lat\":" + String(lat, 8) + ",\"Batt\":" + String(batteryLevel) + "}";
+    client.print(String("POST ") + resource + " HTTP/1.1\r\n");
+    client.print(String("Host: ") + server + "\r\n");
+    client.println("Connection: keep-alive"); // Use persistent connection
+    client.println("Content-Type: application/json");
+    client.print("Content-Length: ");
+    client.println(httpRequestData.length());
+    client.println();
+    client.println(httpRequestData);
 
-        // Read and print the response from the server
-        unsigned long timeout = millis();
-        bool success = false;
-        while (client.connected() && millis() - timeout < 10000L) {
-            if (client.available()) {
-                char c = client.read();
-                SerialMon.print(c);
-                if (c == '2') { // Check for HTTP 2xx success response
-                    success = true;
-                }
-                timeout = millis();
+    // Read and print the response from the server
+    unsigned long timeout = millis();
+    bool success = false;
+    while (client.connected() && millis() - timeout < 10000L) {
+        if (client.available()) {
+            char c = client.read();
+            SerialMon.print(c);
+            if (c == '2') { // Check for HTTP 2xx success response
+                success = true;
             }
+            timeout = millis();
         }
-        SerialMon.println("\nHTTP POST request complete.");
-        client.stop();
-
-        if (success) {
-            SerialMon.println("Data successfully inserted into MongoDB. Flashing LED...");
-            flashLED(LED_PIN, 10, 100); // Flash LED 5 times quickly
-        }
-    } else {
-        SerialMon.println("Connection to server failed.");
     }
+    SerialMon.println("\nHTTP POST request complete.");
 
-    // Disconnect GPRS
-    modem.gprsDisconnect();
-    SerialMon.println("GPRS disconnected.");
+    if (success) {
+        SerialMon.println("Data successfully inserted into MongoDB. Flashing LED...");
+        flashLED(LED_PIN, 10, 100); // Flash LED 5 times quickly
+    } else {
+        SerialMon.println("Server response did not indicate success.");
+    }
 }
 
 bool checkNetworkAndConnect() {
