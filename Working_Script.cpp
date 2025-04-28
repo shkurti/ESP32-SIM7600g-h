@@ -247,7 +247,8 @@ void performHttpPost(float lat, float lon, float temp, float hum) {
 
     // Perform HTTP POST request
     SerialMon.println("Performing HTTP POST request...");
-    String httpRequestData = "{\"trackerID\": 55,\"DT\": \"" + String(timestamp) + "\",\"D\": \"GPS123\",\"Temp\": " + String(temp, 5) + ",\"Hum\": " + String(hum, 5) + ",\"Lng\": " + String(lon, 8) + ",\"Lat\":" + String(lat, 8) + ",\"Batt\":" + String(batteryLevel) + "}";
+    //String httpRequestData = "{\"trackerID\": 55,\"DT\": \"" + String(timestamp) + "\",\"D\": \"GPS123\",\"Temp\": " + String(temp, 5) + ",\"Hum\": " + String(hum, 5) + ",\"Lng\": " + String(lon, 8) + ",\"Lat\":" + String(lat, 8) + ",\"Batt\":" + String(batteryLevel) + "}";
+    String httpRequestData = "{\"trackerID\": 555,\"D\": \"GPS123\",\"Temp\": " + String(temp, 5) + ",\"Hum\": " + String(hum, 5) + ",\"Lng\": " + String(lon, 8) + ",\"Lat\":" + String(lat, 8) + ",\"Batt\":" + String(batteryLevel) + "}";    
     client.print(String("POST ") + resource + " HTTP/1.1\r\n");
     client.print(String("Host: ") + server + "\r\n");
     client.println("Connection: keep-alive"); // Use persistent connection
