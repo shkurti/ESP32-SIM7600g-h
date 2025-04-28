@@ -115,10 +115,17 @@ void loop() {
     if (!gpsEnabled) {
         SerialMon.println("Enabling GPS...");
         modem.enableGPS();
+        delay(15000); // Wait for GPS to enable
         gpsEnabled = true; // Mark GPS as enabled
     }
 
     float lat, lon;
+    float speed = 0;
+    float alt = 0;
+    int vsat = 0, usat = 0; // Added vsat and usat variables
+    float accuracy = 0;
+    int year = 0, month = 0, day = 0, hour = 0, min = 0, sec = 0;
+
     float temp = sht31.readTemperature();
     float hum = sht31.readHumidity();
 
@@ -126,7 +133,7 @@ void loop() {
     SerialMon.println("Attempting to get GPS location...");
     bool gpsFix = false;
     for (int i = 0; i < 10; i++) { // Retry up to 10 times
-        if (modem.getGPS(&lat, &lon)) {
+        if (modem.getGPS(&lat, &lon, &speed, &alt, &vsat, &usat, &accuracy, &year, &month, &day, &hour, &min, &sec)) {
             gpsFix = true;
             break;
         }
@@ -151,7 +158,8 @@ void loop() {
     }
 
     if (gpsFix) {
-        SerialMon.printf("GPS Location: Latitude: %f, Longitude: %f\n", lat, lon);
+        SerialMon.printf("GPS Location: Latitude: %f, Longitude: %f, Speed: %f, Altitude: %f, Accuracy: %f, Visible Satellites: %d, Used Satellites: %d, Date: %04d-%02d-%02d, Time: %02d:%02d:%02d\n", 
+                 lat, lon, speed, alt, accuracy, vsat, usat, year, month, day, hour, min, sec);
 
         // Check network connection and connect to GPRS if not already connected
         if (!gprsConnected) {
@@ -164,7 +172,7 @@ void loop() {
         }
 
         // Perform HTTP POST request
-        performHttpPost(lat, lon, temp, hum);
+        performHttpPost(lat, lon, temp, hum, speed, year, month, day, hour, min, sec);
     } else {
         SerialMon.println("Failed to get GPS location after multiple attempts.");
     }
@@ -214,14 +222,14 @@ void flashLED(int pin, int times, int delayMs) {
     }
 }
 
-void performHttpPost(float lat, float lon, float temp, float hum) {
+void performHttpPost(float lat, float lon, float temp, float hum, float speed, int year, int month, int day, int hour, int min, int sec) {
     // Get the current time
     time_t now = time(nullptr);
     struct tm *timeinfo = localtime(&now);
 
     // Format the timestamp as YYYY-DD-MM HH:MM:SS
-    char timestamp[20];
-    strftime(timestamp, sizeof(timestamp), "%Y-%d-%m %H:%M:%S", timeinfo);
+    char gpsTimestamp[20];
+    snprintf(gpsTimestamp, sizeof(gpsTimestamp), "%04d-%02d-%02d %02d:%02d:%02d", year, month, day, hour, min, sec);
 
     // Get battery level
     int batteryLevel = getBatteryLevel();
@@ -247,9 +255,12 @@ void performHttpPost(float lat, float lon, float temp, float hum) {
 
     // Perform HTTP POST request
     SerialMon.println("Performing HTTP POST request...");
-    //String httpRequestData = "{\"trackerID\": 55,\"DT\": \"" + String(timestamp) + "\",\"D\": \"GPS123\",\"Temp\": " + String(temp, 5) + ",\"Hum\": " + String(hum, 5) + ",\"Lng\": " + String(lon, 8) + ",\"Lat\":" + String(lat, 8) + ",\"Batt\":" + String(batteryLevel) + "}";
-    String httpRequestData = "{\"trackerID\": 555,\"D\": \"GPS123\",\"Temp\": " + String(temp, 5) + ",\"Hum\": " + String(hum, 5) + ",\"Lng\": " + String(lon, 8) + ",\"Lat\":" + String(lat, 8) + ",\"Batt\":" + String(batteryLevel) + "}";    
-    client.print(String("POST ") + resource + " HTTP/1.1\r\n");
+    String httpRequestData = "{\"trackerID\": 555,\"D\": \"GPS123\",\"Temp\": " + String(temp, 5) + 
+                             ",\"Hum\": " + String(hum, 5) + ",\"Lng\": " + String(lon, 8) + 
+                             ",\"Lat\": " + String(lat, 8) + ",\"Speed\": " + String(speed, 2) + 
+                             ",\"DT\": \"" + String(gpsTimestamp) + "\",\"Batt\": " + String(batteryLevel) + "}";
+    
+                             client.print(String("POST ") + resource + " HTTP/1.1\r\n");
     client.print(String("Host: ") + server + "\r\n");
     client.println("Connection: keep-alive"); // Use persistent connection
     client.println("Content-Type: application/json");
