@@ -7,8 +7,10 @@
 #include <Wire.h>
 #include "Adafruit_SHT31.h"
 #include <time.h> // Include the time library
+#include <vector>
+#include <ArduinoJson.h> // Include ArduinoJson for JSON handling
 
-Adafruit_SHT31 sht31 = Adafruit_SHT31();
+Adafruit_SHT31 sht31 = Adafruit_SHT31(); // Corrected type name
 
 // Define serial interfaces and pins
 #define SerialMon Serial
@@ -31,6 +33,9 @@ const int port = 80;
 // Modem instance
 TinyGsm modem(SerialAT);
 TinyGsmClient client(modem);
+
+// Buffer to store GPS, temperature, and humidity readings
+std::vector<String> dataBuffer;
 
 void setup() {
     // Initialize serial monitor
@@ -111,6 +116,8 @@ void setup() {
 void loop() {
     static bool gpsEnabled = false; // Track GPS state
     static bool gprsConnected = false; // Track GPRS connection state
+    static unsigned long lastCaptureTime = 0; // Track the last capture time
+    static unsigned long lastPostTime = 0; // Track the last HTTP POST time
 
     if (!gpsEnabled) {
         SerialMon.println("Enabling GPS...");
@@ -129,39 +136,40 @@ void loop() {
     float temp = sht31.readTemperature();
     float hum = sht31.readHumidity();
 
-    // Attempt to get GPS location with retries
-    SerialMon.println("Attempting to get GPS location...");
-    bool gpsFix = false;
-    for (int i = 0; i < 10; i++) { // Retry up to 10 times
+    // Capture data every 5 seconds
+    if (millis() - lastCaptureTime >= 5000) {
+        lastCaptureTime = millis();
+
+        // Attempt to get GPS location
         if (modem.getGPS(&lat, &lon, &speed, &alt, &vsat, &usat, &accuracy, &year, &month, &day, &hour, &min, &sec)) {
-            gpsFix = true;
-            break;
-        }
+            // Get the battery level
+            int batteryLevel = getBatteryLevel();
+            SerialMon.printf("Battery Level: %d%%\n", batteryLevel);
 
-        // Log GPS status for debugging
-        modem.sendAT("+CGNSINF");
-        if (modem.waitResponse(1000) == 1) {
-            String gpsStatus = modem.stream.readStringUntil('\n');
-            SerialMon.println("GPS Status: " + gpsStatus);
+            // Format data as JSON and add to buffer
+            StaticJsonDocument<256> doc;
+            doc["Lat"] = lat;
+            doc["Lng"] = lon;
+            doc["Temp"] = temp;
+            doc["Hum"] = hum;
+            doc["Speed"] = speed;
+            doc["DT"] = String(year) + "-" + String(month) + "-" + String(day) + " " + String(hour) + ":" + String(min) + ":" + String(sec);
+            doc["Batt"] = batteryLevel; // Add battery level to the object
 
-            // Check if GPS has a fix (based on CGNSINF response format)
-            if (gpsStatus.indexOf(",1,") != -1) { // "1" indicates a valid fix
-                gpsFix = true;
-                break;
-            }
+            String jsonData;
+            serializeJson(doc, jsonData);
+            dataBuffer.push_back(jsonData);
+
+            SerialMon.println("Data captured and added to buffer.");
         } else {
-            SerialMon.println("Failed to retrieve GPS status.");
+            SerialMon.println("Failed to get GPS location.");
         }
-
-        SerialMon.println("Failed to get GPS location. Retrying...");
-        delay(5000); // Wait 5 seconds before retrying
     }
 
-    if (gpsFix) {
-        SerialMon.printf("GPS Location: Latitude: %f, Longitude: %f, Speed: %f, Altitude: %f, Accuracy: %f, Visible Satellites: %d, Used Satellites: %d, Date: %04d-%02d-%02d, Time: %02d:%02d:%02d\n", 
-                 lat, lon, speed, alt, accuracy, vsat, usat, year, month, day, hour, min, sec);
+    // Perform HTTP POST request every 30 seconds
+    if (millis() - lastPostTime >= 30000) {
+        lastPostTime = millis();
 
-        // Check network connection and connect to GPRS if not already connected
         if (!gprsConnected) {
             SerialMon.println("Connecting to GPRS...");
             if (!checkNetworkAndConnect()) {
@@ -171,13 +179,13 @@ void loop() {
             gprsConnected = true; // Mark GPRS as connected
         }
 
-        // Perform HTTP POST request
-        performHttpPost(lat, lon, temp, hum, speed, year, month, day, hour, min, sec);
-    } else {
-        SerialMon.println("Failed to get GPS location after multiple attempts.");
+        if (!dataBuffer.empty()) {
+            performHttpPost(dataBuffer);
+            dataBuffer.clear(); // Clear the buffer after sending
+        } else {
+            SerialMon.println("Buffer is empty, skipping HTTP POST.");
+        }
     }
-
-    delay(10000); // Wait for 10 seconds before the next loop iteration
 }
 
 int getBatteryLevel() {
@@ -222,19 +230,7 @@ void flashLED(int pin, int times, int delayMs) {
     }
 }
 
-void performHttpPost(float lat, float lon, float temp, float hum, float speed, int year, int month, int day, int hour, int min, int sec) {
-    // Get the current time
-    time_t now = time(nullptr);
-    struct tm *timeinfo = localtime(&now);
-
-    // Format the timestamp as YYYY-DD-MM HH:MM:SS
-    char gpsTimestamp[20];
-    snprintf(gpsTimestamp, sizeof(gpsTimestamp), "%04d-%02d-%02d %02d:%02d:%02d", year, month, day, hour, min, sec);
-
-    // Get battery level
-    int batteryLevel = getBatteryLevel();
-    SerialMon.printf("Battery Level: %d%%\n", batteryLevel); // Debug log for battery level
-
+void performHttpPost(const std::vector<String>& buffer) {
     // Ensure GPRS connection is active
     if (!modem.isGprsConnected()) {
         SerialMon.println("GPRS is not connected. Attempting to reconnect...");
@@ -253,14 +249,25 @@ void performHttpPost(float lat, float lon, float temp, float hum, float speed, i
         }
     }
 
-    // Perform HTTP POST request
+    // Prepare JSON object with buffer data as a string
     SerialMon.println("Performing HTTP POST request...");
-    String httpRequestData = "{\"trackerID\": 555,\"D\": \"GPS123\",\"Temp\": " + String(temp, 5) + 
-                             ",\"Hum\": " + String(hum, 5) + ",\"Lng\": " + String(lon, 8) + 
-                             ",\"Lat\": " + String(lat, 8) + ",\"Speed\": " + String(speed, 2) + 
-                             ",\"DT\": \"" + String(gpsTimestamp) + "\",\"Batt\": " + String(batteryLevel) + "}";
-    
-                             client.print(String("POST ") + resource + " HTTP/1.1\r\n");
+    String bufferData = "[";
+    for (size_t i = 0; i < buffer.size(); i++) {
+        bufferData += buffer[i];
+        if (i < buffer.size() - 1) {
+            bufferData += ",";
+        }
+    }
+    bufferData += "]";
+
+    // Get the battery level
+    int batteryLevel = getBatteryLevel();
+    SerialMon.printf("Battery Level: %d%%\n", batteryLevel);
+
+    // Construct the final JSON object
+    String httpRequestData = "{\"trackerID\": 777,\"D\": \"GPS123\",\"data\": " + bufferData + "}";
+
+    client.print(String("POST ") + resource + " HTTP/1.1\r\n");
     client.print(String("Host: ") + server + "\r\n");
     client.println("Connection: keep-alive"); // Use persistent connection
     client.println("Content-Type: application/json");
